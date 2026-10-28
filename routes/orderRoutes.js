@@ -1,145 +1,170 @@
+
 const express = require("express");
 const prisma = require("../prismaClient");
 const authMiddleware = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// ==============================
-// CREATE ORDER
-// POST /api/orders
-// ==============================
+// CREATE ORDER - MULTIPLE PRODUCTS
 router.post("/", authMiddleware, async (req, res) => {
   try {
     const uid = req.user.uid;
-    const { pid, qty } = req.body;
+    const { items } = req.body;
 
-    if (!pid || !qty || qty <= 0) {
+    if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
-        message: "Vui long nhap pid va qty hop le"
+        message: "Danh sach san pham khong hop le"
       });
     }
 
-    const product = await prisma.product.findUnique({
-      where: {
-        pid: Number(pid)
+    const quantities = new Map();
+
+    for (const item of items) {
+      const pid = Number(item?.pid);
+      const qty = Number(item?.qty);
+
+      if (!Number.isSafeInteger(pid) || pid <= 0 ||
+          !Number.isSafeInteger(qty) || qty <= 0) {
+        return res.status(400).json({
+          message: "pid hoac qty khong hop le"
+        });
       }
-    });
 
-    if (!product) {
-      return res.status(404).json({
-        message: "Product not found"
-      });
-    }
-
-    if (product.quantity < Number(qty)) {
-      return res.status(400).json({
-        message: "Khong du so luong san pham"
-      });
+      quantities.set(pid, (quantities.get(pid) || 0) + qty);
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      const products = [];
+
+      for (const [pid, qty] of quantities) {
+        const product = await tx.product.findUnique({
+          where: { pid }
+        });
+
+        if (!product) {
+          throw new Error(`Khong tim thay san pham ${pid}`);
+        }
+
+        // Tru ton co dieu kien de tranh ban vuot so luong
+        const updated = await tx.product.updateMany({
+          where: {
+            pid,
+            quantity: { gte: qty }
+          },
+          data: {
+            quantity: { decrement: qty }
+          }
+        });
+
+        if (updated.count !== 1) {
+          throw new Error(`Khong du ton kho san pham ${pid}`);
+        }
+
+        products.push({ product, qty });
+      }
+
+      // Tao 1 don hang, lay thoi gian hien tai
       const order = await tx.order.create({
         data: {
-          uid: uid,
+          uid,
           createat: new Date()
         }
       });
 
-      const orderDetail = await tx.orderDetail.create({
+      // Tao nhieu chi tiet trong cung don hang
+      const orderDetails = [];
+
+      for (const { product, qty } of products) {
+        const detail = await tx.orderDetail.create({
+          data: {
+            oid: order.oid,
+            pid: product.pid,
+            qty,
+            unit_price: product.price
+          }
+        });
+
+        orderDetails.push(detail);
+      }
+
+      // Tao shipment sau khi dat hang thanh cong
+      const shipment = await tx.shipment.create({
         data: {
           oid: order.oid,
-          pid: product.pid,
-          qty: Number(qty),
-          unit_price: product.price
+          status: "PENDING"
         }
       });
 
-      await tx.product.update({
-        where: {
-          pid: product.pid
-        },
-        data: {
-          quantity: {
-            decrement: Number(qty)
-          }
-        }
-      });
-
-      return {
-        order,
-        orderDetail
-      };
+      return { order, orderDetails, shipment };
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       message: "Create order successful",
-      order: result.order,
-      orderDetail: result.orderDetail
+      ...result
     });
 
   } catch (error) {
     console.error(error);
 
-    res.status(500).json({
+    if (
+      error.message.startsWith("Khong tim thay") ||
+      error.message.startsWith("Khong du ton")
+    ) {
+      return res.status(400).json({
+        message: error.message
+      });
+    }
+
+    return res.status(500).json({
       message: "Internal Server Error"
     });
   }
 });
 
-// ==============================
 // GET ALL ORDERS OF CURRENT USER
-// GET /api/orders
-// ==============================
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const uid = req.user.uid;
-
     const orders = await prisma.order.findMany({
-      where: {
-        uid: uid
-      },
+      where: { uid: req.user.uid },
       include: {
         orderDetails: {
-          include: {
-            product: true
-          }
+          include: { product: true }
         }
       }
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       message: "Get orders successful",
       orders
     });
 
   } catch (error) {
     console.error(error);
-
-    res.status(500).json({
+    return res.status(500).json({
       message: "Internal Server Error"
     });
   }
 });
 
-// ==============================
 // GET ORDER BY ID
-// GET /api/orders/:oid
-// ==============================
 router.get("/:oid", authMiddleware, async (req, res) => {
   try {
     const oid = Number(req.params.oid);
-    const uid = req.user.uid;
+
+    if (!Number.isSafeInteger(oid) || oid <= 0) {
+      return res.status(400).json({
+        message: "Order ID khong hop le"
+      });
+    }
 
     const order = await prisma.order.findFirst({
       where: {
-        oid: oid,
-        uid: uid
+        oid,
+        uid: req.user.uid
       },
       include: {
         orderDetails: {
-          include: {
-            product: true
-          }
+          include: { product: true }
         }
       }
     });
@@ -150,15 +175,14 @@ router.get("/:oid", authMiddleware, async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       message: "Get order successful",
       order
     });
 
   } catch (error) {
     console.error(error);
-
-    res.status(500).json({
+    return res.status(500).json({
       message: "Internal Server Error"
     });
   }

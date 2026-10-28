@@ -25,7 +25,7 @@ router.post("/register", async (req, res) => {
     }
 
     const role = await prisma.role.findFirst({
-      where: { rolename: "CUSTOMER" }
+      where: { rolename: "normal" }
     });
 
     const membership = await prisma.memberShip.findFirst({
