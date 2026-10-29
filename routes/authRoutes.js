@@ -58,9 +58,13 @@ router.post("/register", async (req, res) => {
     });
 
     res.status(201).json({
-      message: "Register successful",
-      user
-    });
+  message: "Register successful",
+  user: {
+    ...user,
+    rolename: role.rolename,
+    score: membership.score
+  }
+});
 
   } catch (error) {
     console.error(error);
